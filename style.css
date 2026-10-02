@@ -78,7 +78,7 @@ svg { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width:
 }
 .captions .you { color: var(--muted); font-size: 14px; margin: 6px 0; min-height: 1em; }
 .captions .ai { font-size: 16px; line-height: 1.75; white-space: pre-wrap; user-select: text; -webkit-user-select: text; }
-.captions .ai pre, .log pre {
+.captions .ai pre, .msg pre {
   text-align: left; white-space: pre; overflow-x: auto;
   background: rgba(8, 14, 34, .85); border: 1px solid var(--line); border-radius: 10px;
   padding: 12px; font-size: 12.5px; line-height: 1.5; position: relative;
@@ -123,21 +123,74 @@ svg { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width:
 .textbar input:focus { border-color: rgba(150,200,255,.5); }
 .textbar button { width: 44px; border-radius: 50%; border: 1px solid var(--line); background: var(--glass); display: grid; place-items: center; }
 
-/* ---- log drawer ---- */
-.log {
+/* ---- header extras ---- */
+.thread-title { font-size: 12px; color: var(--muted); max-width: 70vw; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-height: 1em; }
+.gear {
+  position: absolute; right: 12px; top: calc(env(safe-area-inset-top) + 12px);
+  width: 40px; height: 40px; border-radius: 50%; display: grid; place-items: center; color: var(--muted);
+}
+.gear:hover, .gear:focus-visible { color: var(--ink); }
+
+/* ---- panels (会話一覧・設定) ---- */
+.panel {
   position: fixed; inset: 0; z-index: 10;
-  background: rgba(3, 6, 16, .94); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+  background: rgba(3, 6, 16, .95); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
   display: flex; flex-direction: column;
   padding-top: env(safe-area-inset-top);
+  user-select: text; -webkit-user-select: text;
 }
-.log[hidden] { display: none; }
-.log-head { display: flex; justify-content: space-between; align-items: center; padding: 14px 16px; border-bottom: 1px solid var(--line); }
-.log-head button { padding: 6px 12px; border: 1px solid var(--line); border-radius: 8px; margin-left: 6px; font-size: 13px; }
-.log-body { flex: 1; overflow-y: auto; padding: 16px; width: min(760px, 100%); margin: 0 auto; user-select: text; -webkit-user-select: text; }
-.msg { margin: 0 0 18px; line-height: 1.7; white-space: pre-wrap; font-size: 15px; }
+.panel[hidden] { display: none; }
+.panel-head { display: flex; justify-content: space-between; align-items: center; padding: 14px 16px; border-bottom: 1px solid var(--line); gap: 12px; }
+.panel-head b { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.panel-head .x { font-size: 22px; width: 40px; height: 40px; border-radius: 50%; color: var(--muted); }
+.panel-body { flex: 1; overflow-y: auto; padding: 16px 16px calc(env(safe-area-inset-bottom) + 24px); width: min(760px, 100%); margin: 0 auto; }
+.view { display: flex; flex-direction: column; gap: 14px; }
+.settings { display: flex; flex-direction: column; gap: 18px; }
+[hidden] { display: none !important; }
+
+.actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.actions button, .threads .del {
+  padding: 9px 14px; border: 1px solid var(--line); border-radius: 10px; font-size: 14px; background: var(--glass);
+}
+.actions button.primary { border-color: rgba(150,200,255,.5); background: rgba(80,140,255,.22); color: #dbe9ff; }
+.hint { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.7; }
+.field {
+  width: 100%; font: inherit; font-size: 16px; color: var(--ink);
+  background: var(--glass); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; outline: none;
+}
+.field:focus { border-color: rgba(150,200,255,.55); }
+textarea.field { resize: vertical; line-height: 1.6; }
+select.field { appearance: none; -webkit-appearance: none; background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%), linear-gradient(135deg, var(--muted) 50%, transparent 50%); background-position: calc(100% - 18px) 55%, calc(100% - 13px) 55%; background-size: 5px 5px; background-repeat: no-repeat; padding-right: 32px; }
+select.field option { background: #0b1226; }
+
+.threads { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.threads li {
+  display: flex; align-items: center; gap: 10px;
+  border: 1px solid var(--line); border-radius: 12px; padding: 12px 12px 12px 14px; background: rgba(120,160,255,.05);
+  cursor: pointer;
+}
+.threads li.current { border-color: rgba(150,200,255,.55); background: rgba(80,140,255,.12); }
+.threads li:hover { background: rgba(120,160,255,.1); }
+.threads .t-main { flex: 1; min-width: 0; }
+.threads .t-title { font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.threads .t-meta { font-size: 12px; color: var(--muted); margin-top: 3px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.badge { font-size: 11px; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--line); color: #a9c8ff; }
+.badge.now { color: #9fe6ff; border-color: rgba(140,215,255,.5); }
+.threads .del, .threads .view { padding: 6px 10px; font-size: 12px; color: var(--muted); border: 1px solid var(--line); border-radius: 8px; }
+.threads .empty { cursor: default; color: var(--muted); justify-content: center; border-style: dashed; }
+
+.log-body { user-select: text; -webkit-user-select: text; }
+.msg { margin: 0 0 18px; line-height: 1.7; white-space: pre-wrap; font-size: 15px; overflow-wrap: anywhere; }
 .msg.user { color: var(--muted); }
 .msg.user::before { content: "あなた"; display: block; font-size: 11px; letter-spacing: .1em; opacity: .7; }
 .msg.assistant::before { content: "AI"; display: block; font-size: 11px; letter-spacing: .1em; color: var(--accent); }
+
+/* ---- settings ---- */
+.settings .row { display: flex; flex-direction: column; gap: 8px; font-size: 14px; }
+.settings output { color: #9fe6ff; margin-left: 6px; font-variant-numeric: tabular-nums; }
+.settings input[type="range"] { width: 100%; accent-color: #6fb8ff; height: 28px; }
+.settings .scale { display: flex; justify-content: space-between; font-size: 11px; color: var(--muted); font-style: normal; }
+.settings .scale i { font-style: normal; }
 
 .toast {
   position: fixed; left: 50%; bottom: calc(env(safe-area-inset-bottom) + 150px); transform: translateX(-50%);

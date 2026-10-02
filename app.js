@@ -5,9 +5,9 @@
   const CONFIG = {
     name: "AI",          // AI の名前（決まったらここを変更）
     lang: "ja-JP",
-    rate: 1.05,          // 読み上げ速度
-    pitch: 1.0,          // 声の高さ
-    maxHistory: 40,
+    rate: 1.05,          // 読み上げ速度の初期値（設定画面で変更可）
+    pitch: 1.0,          // 声の高さの初期値（設定画面で変更可）
+    sendChars: 120000,   // 1回に Claude へ送る会話の上限（文字数。古いものから省く）
   };
 
   const $ = (id) => document.getElementById(id);
@@ -15,22 +15,76 @@
     body: document.body, statusText: $("statusText"), aiName: $("aiName"),
     float: $("orbFloat"), halo: $("halo"), ring: $("ring"),
     you: $("youText"), ai: $("aiText"), captions: $("captions"),
-    mic: $("micBtn"), handsfree: $("handsfreeBtn"), logBtn: $("logBtn"),
-    log: $("log"), logBody: $("logBody"), closeLog: $("closeLogBtn"), clear: $("clearBtn"),
+    mic: $("micBtn"), handsfree: $("handsfreeBtn"), threadTitle: $("threadTitle"),
     form: $("textForm"), input: $("textInput"), toast: $("toast"),
   };
   els.aiName.textContent = CONFIG.name;
 
   const store = {
     get(k, d) { try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); } catch { return d; } },
-    set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
+    set(k, v) {
+      try { localStorage.setItem(k, JSON.stringify(v)); return true; }
+      catch { toast("この端末の保存容量がいっぱいです。古い会話を削除してください。", 5000); return false; }
+    },
+    del(k) { try { localStorage.removeItem(k); } catch {} },
   };
+
+  // ===== 会話（スレッド）の保存 =====
+  // 一覧: va.threads = [{ id, title, source: "app" | "claude" | "paste", updated }]
+  // 本文: va.t.<id> = [{ role, content }]
+  const newId = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+  let threads = store.get("va.threads", []);
+  let currentId = store.get("va.current", null);
+  let history = [];
+
+  function saveIndex() { store.set("va.threads", threads); store.set("va.current", currentId); }
+  function currentThread() { return threads.find((t) => t.id === currentId); }
+
+  function createThread({ title = "", source = "app", messages = [] } = {}) {
+    const t = { id: newId(), title, source, updated: Date.now() };
+    threads.unshift(t);
+    store.set("va.t." + t.id, messages);
+    currentId = t.id;
+    history = messages;
+    saveIndex();
+    return t;
+  }
+
+  function openThread(id) {
+    const t = threads.find((x) => x.id === id);
+    if (!t) return;
+    currentId = id;
+    history = store.get("va.t." + id, []);
+    saveIndex();
+  }
+
+  function deleteThread(id) {
+    threads = threads.filter((t) => t.id !== id);
+    store.del("va.t." + id);
+    if (currentId === id) {
+      if (threads[0]) openThread(threads[0].id);
+      else createThread();
+    }
+    saveIndex();
+  }
+
+  // 旧バージョン（会話が1つだけ）の履歴を引き継ぐ
+  (() => {
+    const old = store.get("va.history", null);
+    if (old && old.length && !threads.length) {
+      const first = old.find((m) => m.role === "user");
+      createThread({ title: first ? first.content.slice(0, 30) : "", messages: old });
+    }
+    if (old) store.del("va.history");
+    if (currentId && threads.some((t) => t.id === currentId)) openThread(currentId);
+    else if (threads[0]) openThread(threads[0].id);
+    else createThread();
+  })();
 
   // ===== 状態 =====
   const STATUS = { idle: "待機中", listening: "聞いています", thinking: "考えています", speaking: "話しています" };
   let state = "idle";
   let handsfree = false;
-  let history = store.get("va.history", []);
   let demoMode = new URLSearchParams(location.search).has("demo") || window.VA_DEMO === true;
 
   function setState(s) {
@@ -126,17 +180,22 @@
   // ===== 音声合成（読み上げ） =====
   const synth = window.speechSynthesis;
   let voice = null;
+  const settings = Object.assign({ voiceURI: "", rate: CONFIG.rate, pitch: CONFIG.pitch }, store.get("va.settings", {}));
   const FEMALE = /Kyoko|O-ren|Nanami|Haruka|Ayumi|Mizuki|Sayaka|Nana|Google 日本語|Shiori|Aoi|Mayu/i;
   const MALE = /Otoya|Hattori|Ichiro|Keita|Daichi|Naoki|Hiroshi/i;
-  function pickVoice() {
-    if (!synth) return;
-    const ja = synth.getVoices().filter((v) => /^ja/i.test(v.lang));
+  function jaVoices() {
+    if (!synth) return [];
     const score = (v) =>
       (FEMALE.test(v.name) ? 10 : 0) - (MALE.test(v.name) ? 20 : 0) +
-      (/Premium|Enhanced|Natural|Neural|Online/i.test(v.name) ? 5 : 0);
-    voice = ja.sort((a, b) => score(b) - score(a))[0] || null;
+      (/Premium|Enhanced|Natural|Neural|Online|拡張/i.test(v.name) ? 5 : 0);
+    return synth.getVoices().filter((v) => /^ja/i.test(v.lang)).sort((a, b) => score(b) - score(a));
   }
-  if (synth) { pickVoice(); synth.onvoiceschanged = pickVoice; }
+  function pickVoice() {
+    const list = jaVoices();
+    voice = list.find((v) => v.voiceURI === settings.voiceURI) || list[0] || null;
+    if (typeof renderVoiceOptions === "function") renderVoiceOptions();
+  }
+  if (synth) { pickVoice(); synth.addEventListener?.("voiceschanged", pickVoice); }
 
   let pendingUtter = 0;
   let streamDone = true;
@@ -167,8 +226,8 @@
     const u = new SpeechSynthesisUtterance(clean);
     u.lang = CONFIG.lang;
     if (voice) u.voice = voice;
-    u.rate = CONFIG.rate;
-    u.pitch = CONFIG.pitch;
+    u.rate = settings.rate;
+    u.pitch = settings.pitch;
     u.onstart = () => { if (state !== "listening") setState("speaking"); };
     u.onboundary = () => { bump = Math.min(0.35, bump + 0.12); };
     const done = () => {
@@ -309,11 +368,29 @@
     }
   }
 
+  // Claude に送る形に整える（同じ話者の連続をまとめ、古いものから文字数の上限まで）
+  function buildPayload(msgs) {
+    const out = [];
+    for (const m of msgs) {
+      const content = String(m.content || "").trim();
+      if (!content) continue;
+      const prev = out[out.length - 1];
+      if (prev && prev.role === m.role) prev.content += "\n\n" + content;
+      else out.push({ role: m.role, content });
+    }
+    let total = 0, start = out.length;
+    while (start > 0 && total + out[start - 1].content.length <= CONFIG.sendChars) total += out[--start].content.length;
+    if (start === out.length && out.length) start = out.length - 1;
+    const sliced = out.slice(start);
+    while (sliced.length && sliced[0].role !== "user") sliced.shift();
+    return sliced;
+  }
+
   async function* apiStream(signal, retried = false) {
     const res = await fetch("/api/chat", {
       method: "POST",
       headers: { "content-type": "application/json", "x-app-passcode": getPass() },
-      body: JSON.stringify({ messages: history }),
+      body: JSON.stringify({ messages: buildPayload(history) }),
       signal,
     });
     if (res.status === 401 && !retried) {
@@ -398,9 +475,21 @@
   }
 
   function saveHistory() {
-    history = history.slice(-CONFIG.maxHistory);
-    while (history.length && history[0].role !== "user") history.shift();
-    store.set("va.history", history);
+    const t = currentThread();
+    if (!t) return;
+    t.updated = Date.now();
+    if (!t.title) {
+      const first = history.find((m) => m.role === "user");
+      if (first) t.title = first.content.replace(/\s+/g, " ").slice(0, 30);
+    }
+    threads = [t, ...threads.filter((x) => x.id !== t.id)];
+    store.set("va.t." + t.id, history);
+    saveIndex();
+    showThreadTitle();
+  }
+  function showThreadTitle() {
+    const t = currentThread();
+    els.threadTitle.textContent = t && t.title ? t.title : "";
   }
 
   // ===== 表示（コードブロック対応） =====
@@ -428,16 +517,252 @@
   }
 
   function renderLog() {
-    els.logBody.innerHTML = "";
-    if (!history.length) { els.logBody.innerHTML = '<p class="msg" style="color:var(--muted)">まだ会話はありません。</p>'; return; }
+    const body = $("logBody");
+    body.innerHTML = "";
+    if (!history.length) { body.innerHTML = '<p class="msg" style="color:var(--muted)">まだ会話はありません。</p>'; return; }
     for (const m of history) {
       const d = document.createElement("div");
       d.className = "msg " + m.role;
       renderRich(d, m.content);
-      els.logBody.appendChild(d);
+      body.appendChild(d);
     }
-    els.logBody.scrollTop = els.logBody.scrollHeight;
+    requestAnimationFrame(() => (body.parentElement.parentElement.scrollTop = 1e9));
   }
+
+  // 画面下の字幕を、今の会話の最後のやり取りにする
+  function showLastExchange() {
+    const lastAi = [...history].reverse().find((m) => m.role === "assistant");
+    const lastUser = [...history].reverse().find((m) => m.role === "user");
+    els.you.textContent = lastUser ? lastUser.content.replace(/\s+/g, " ").slice(0, 80) : "";
+    if (lastAi) renderRich(els.ai, lastAi.content);
+    else els.ai.textContent = demoMode ? "デモモードです。マイクボタンか球体をタップして話しかけてください。" : "マイクボタンか球体をタップして話しかけてください。";
+    els.captions.scrollTop = 0;
+    showThreadTitle();
+  }
+
+  // ===== パネル（会話一覧・設定） =====
+  const panels = { threads: $("threadsPanel"), settings: $("settingsPanel") };
+  const views = ["threadsView", "pickView", "pasteView", "logView"];
+  function openPanel(name) { panels[name].hidden = false; }
+  function closePanels() { Object.values(panels).forEach((p) => (p.hidden = true)); }
+  function anyPanelOpen() { return Object.values(panels).some((p) => !p.hidden); }
+  function showView(id, title) {
+    views.forEach((v) => ($(v).hidden = v !== id));
+    $("threadsHeadTitle").textContent = title;
+    panels.threads.querySelector(".panel-body").scrollTop = 0;
+  }
+  document.querySelectorAll("[data-close]").forEach((b) => b.addEventListener("click", closePanels));
+
+  const SOURCE = { app: "", claude: "claude.ai", paste: "貼り付け" };
+  function fmtDate(ms) {
+    const d = new Date(ms), now = new Date();
+    const hm = d.toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" });
+    if (d.toDateString() === now.toDateString()) return "今日 " + hm;
+    return d.toLocaleDateString("ja-JP", { month: "numeric", day: "numeric" }) + " " + hm;
+  }
+
+  function renderThreads() {
+    const ul = $("threadList");
+    ul.innerHTML = "";
+    for (const t of threads) {
+      const count = (store.get("va.t." + t.id, []) || []).length;
+      const li = document.createElement("li");
+      if (t.id === currentId) li.className = "current";
+      li.innerHTML = `<div class="t-main"><div class="t-title"></div><div class="t-meta"></div></div>
+        <button class="view">ログ</button><button class="del">削除</button>`;
+      li.querySelector(".t-title").textContent = t.title || "（無題の会話）";
+      const meta = li.querySelector(".t-meta");
+      if (t.id === currentId) meta.insertAdjacentHTML("beforeend", '<span class="badge now">いまの会話</span>');
+      if (SOURCE[t.source]) meta.insertAdjacentHTML("beforeend", `<span class="badge">${SOURCE[t.source]}</span>`);
+      meta.insertAdjacentText("beforeend", `${fmtDate(t.updated)} ・ ${count}件`);
+      li.addEventListener("click", () => switchTo(t.id));
+      li.querySelector(".view").addEventListener("click", (e) => {
+        e.stopPropagation();
+        openThread(t.id);
+        showLastExchange();
+        renderLog();
+        showView("logView", t.title || "会話ログ");
+      });
+      li.querySelector(".del").addEventListener("click", (e) => {
+        e.stopPropagation();
+        if (li.dataset.confirm) {
+          deleteThread(t.id);
+          showLastExchange();
+          renderThreads();
+        } else {
+          li.dataset.confirm = "1";
+          e.target.textContent = "本当に削除";
+          setTimeout(() => { if (li.isConnected) { delete li.dataset.confirm; e.target.textContent = "削除"; } }, 3000);
+        }
+      });
+      ul.appendChild(li);
+    }
+  }
+
+  function switchTo(id) {
+    interrupt();
+    if (rec) rec.abort();
+    openThread(id);
+    setState("idle");
+    showLastExchange();
+    closePanels();
+    const t = currentThread();
+    toast(`「${t.title || "無題の会話"}」の続きから話せます`);
+  }
+
+  // --- claude.ai の書き出しファイルから取り込む ---
+  // claude.ai の「設定 → プライバシー → データを書き出す」で届く zip（または中の conversations.json）
+  let exported = [];
+  function loadScript(src) {
+    return new Promise((res, rej) => {
+      const s = document.createElement("script");
+      s.src = src; s.onload = res; s.onerror = () => rej(new Error("読み込みに失敗しました"));
+      document.head.appendChild(s);
+    });
+  }
+  async function readExport(file) {
+    let text;
+    if (/\.zip$/i.test(file.name) || file.type.includes("zip")) {
+      if (!window.JSZip) await loadScript("https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js");
+      const zip = await window.JSZip.loadAsync(file);
+      const entry = Object.values(zip.files).find((f) => /(^|\/)conversations\.json$/i.test(f.name));
+      if (!entry) throw new Error("zip の中に conversations.json が見つかりません");
+      text = await entry.async("string");
+    } else {
+      text = await file.text();
+    }
+    const data = JSON.parse(text);
+    const list = Array.isArray(data) ? data : data.conversations || [];
+    return list.map((c) => {
+      const msgs = (c.chat_messages || c.messages || []).map((m) => {
+        const role = /human|user/i.test(m.sender || m.role) ? "user" : "assistant";
+        let content = m.text || "";
+        if (!content && Array.isArray(m.content)) content = m.content.filter((p) => p.type === "text").map((p) => p.text).join("\n");
+        if (typeof m.content === "string" && !content) content = m.content;
+        return { role, content: String(content || "").trim() };
+      }).filter((m) => m.content);
+      return { title: (c.name || "").trim() || "（無題の会話）", updated: Date.parse(c.updated_at || c.created_at) || 0, messages: msgs };
+    }).filter((c) => c.messages.length).sort((a, b) => b.updated - a.updated);
+  }
+
+  function renderPick() {
+    const q = $("pickSearch").value.trim().toLowerCase();
+    const ul = $("pickList");
+    ul.innerHTML = "";
+    const items = exported.filter((c) => !q || c.title.toLowerCase().includes(q)).slice(0, 200);
+    if (!items.length) { ul.innerHTML = '<li class="empty">見つかりませんでした</li>'; return; }
+    for (const c of items) {
+      const li = document.createElement("li");
+      li.innerHTML = '<div class="t-main"><div class="t-title"></div><div class="t-meta"></div></div>';
+      li.querySelector(".t-title").textContent = c.title;
+      li.querySelector(".t-meta").textContent = `${c.updated ? fmtDate(c.updated) : ""} ・ ${c.messages.length}件`;
+      li.addEventListener("click", () => {
+        interrupt();
+        const note = { role: "user", content: "（以下は、以前 claude.ai で行った会話の記録です。この続きを一緒に深めたいです。）" };
+        createThread({ title: c.title, source: "claude", messages: [note, ...c.messages] });
+        saveHistory();
+        switchTo(currentId);
+      });
+      ul.appendChild(li);
+    }
+  }
+
+  $("importFileBtn").addEventListener("click", () => $("importFile").click());
+  $("importFile").addEventListener("change", async (e) => {
+    const file = e.target.files[0];
+    e.target.value = "";
+    if (!file) return;
+    toast("読み込んでいます…", 8000);
+    try {
+      exported = await readExport(file);
+      if (!exported.length) throw new Error("会話が見つかりませんでした");
+      toast(`${exported.length}件の会話が見つかりました`);
+      $("pickSearch").value = "";
+      renderPick();
+      showView("pickView", "取り込む会話を選ぶ");
+    } catch (err) {
+      toast("取り込めませんでした：" + (err.message || err), 6000);
+    }
+  });
+  $("pickSearch").addEventListener("input", renderPick);
+  $("pickBackBtn").addEventListener("click", () => { renderThreads(); showView("threadsView", "会話"); });
+
+  // --- 貼り付けて取り込む ---
+  $("importPasteBtn").addEventListener("click", () => {
+    $("pasteTitle").value = ""; $("pasteText").value = "";
+    showView("pasteView", "貼り付けて取り込む");
+    setTimeout(() => $("pasteText").focus(), 50);
+  });
+  $("pasteBackBtn").addEventListener("click", () => { renderThreads(); showView("threadsView", "会話"); });
+  $("pasteSaveBtn").addEventListener("click", () => {
+    const text = $("pasteText").value.trim();
+    if (!text) { toast("会話を貼り付けてください"); return; }
+    const title = $("pasteTitle").value.trim() || text.replace(/\s+/g, " ").slice(0, 30);
+    interrupt();
+    createThread({
+      title, source: "paste",
+      messages: [
+        { role: "user", content: "以下は、以前 Claude と行った会話の記録です。この内容を踏まえて、続きを一緒に深めてください。\n\n---\n" + text },
+        { role: "assistant", content: "会話の内容を確認しました。続きからお話ししましょう。いま一番深めたいのは、どの部分ですか？" },
+      ],
+    });
+    saveHistory();
+    switchTo(currentId);
+  });
+
+  $("newThreadBtn").addEventListener("click", () => {
+    interrupt();
+    createThread();
+    setState("idle");
+    showLastExchange();
+    closePanels();
+    toast("新しい会話を始めます");
+  });
+  $("logBackBtn").addEventListener("click", () => { renderThreads(); showView("threadsView", "会話"); });
+  $("threadsBtn").addEventListener("click", () => {
+    renderThreads();
+    showView("threadsView", "会話");
+    openPanel("threads");
+  });
+
+  // ===== 設定（声・速さ・高さ・合言葉） =====
+  function renderVoiceOptions() {
+    const sel = $("voiceSel");
+    if (!sel) return;
+    const list = jaVoices();
+    sel.innerHTML = "";
+    const auto = new Option("おまかせ（女性の声を自動で選択）", "");
+    sel.add(auto);
+    for (const v of list) sel.add(new Option(v.name + (v.localService ? "" : "（オンライン）"), v.voiceURI));
+    if (!list.length) sel.add(new Option("この端末には日本語の声が見つかりません", "", false, false));
+    sel.value = list.some((v) => v.voiceURI === settings.voiceURI) ? settings.voiceURI : "";
+  }
+  function renderSettings() {
+    renderVoiceOptions();
+    $("rateIn").value = settings.rate;
+    $("pitchIn").value = settings.pitch;
+    $("rateOut").textContent = "×" + Number(settings.rate).toFixed(2);
+    $("pitchOut").textContent = Number(settings.pitch).toFixed(2);
+    $("passIn").value = getPass();
+  }
+  function saveSettings() { store.set("va.settings", settings); pickVoice(); }
+  $("voiceSel").addEventListener("change", (e) => { settings.voiceURI = e.target.value; saveSettings(); preview(); });
+  $("rateIn").addEventListener("input", (e) => { settings.rate = +e.target.value; $("rateOut").textContent = "×" + settings.rate.toFixed(2); saveSettings(); });
+  $("pitchIn").addEventListener("input", (e) => { settings.pitch = +e.target.value; $("pitchOut").textContent = settings.pitch.toFixed(2); saveSettings(); });
+  $("rateIn").addEventListener("change", preview);
+  $("pitchIn").addEventListener("change", preview);
+  function preview() {
+    unlockAudio();
+    stopSpeaking();
+    speak("こんにちは。この声と速さでお話しします。");
+  }
+  $("previewBtn").addEventListener("click", preview);
+  $("resetVoiceBtn").addEventListener("click", () => {
+    Object.assign(settings, { voiceURI: "", rate: CONFIG.rate, pitch: CONFIG.pitch });
+    saveSettings(); renderSettings(); preview();
+  });
+  $("passSaveBtn").addEventListener("click", () => { store.set("va.passcode", $("passIn").value.trim()); toast("合言葉を保存しました"); });
+  $("settingsBtn").addEventListener("click", () => { renderSettings(); openPanel("settings"); });
 
   // ===== ハンズフリー（画面を点けたまま、会話を続ける） =====
   let wakeLock = null;
@@ -467,15 +792,6 @@
   els.mic.addEventListener("click", onMainAction);
   $("stage").addEventListener("click", onMainAction);
   els.handsfree.addEventListener("click", () => { unlockAudio(); setHandsfree(!handsfree); });
-  els.logBtn.addEventListener("click", () => { renderLog(); els.log.hidden = false; });
-  els.closeLog.addEventListener("click", () => (els.log.hidden = true));
-  els.clear.addEventListener("click", () => {
-    interrupt();
-    history = []; saveHistory(); renderLog();
-    els.you.textContent = ""; els.ai.textContent = "";
-    setState("idle");
-    toast("新しい会話を始めます");
-  });
   els.form.addEventListener("submit", (e) => {
     e.preventDefault();
     const v = els.input.value;
@@ -485,15 +801,17 @@
   });
   // PC：スペースキーで話しかける
   addEventListener("keydown", (e) => {
-    if (e.code === "Space" && document.activeElement !== els.input && els.log.hidden) {
+    const typing = /INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName || "");
+    if (e.code === "Space" && !typing && !anyPanelOpen()) {
       e.preventDefault();
       if (!e.repeat) onMainAction();
     }
-    if (e.key === "Escape") { interrupt(); if (state !== "listening") setState("idle"); }
+    if (e.key === "Escape") {
+      if (anyPanelOpen()) { closePanels(); return; }
+      interrupt(); if (state !== "listening") setState("idle");
+    }
   });
 
-  // 前回の最後の返答を表示
-  const lastAi = [...history].reverse().find((m) => m.role === "assistant");
-  if (lastAi) renderRich(els.ai, lastAi.content);
-  else els.ai.textContent = demoMode ? "デモモードです。マイクボタンか球体をタップして話しかけてください。" : "マイクボタンか球体をタップして話しかけてください。";
+  // 前回の会話の最後のやり取りを表示
+  showLastExchange();
 })();

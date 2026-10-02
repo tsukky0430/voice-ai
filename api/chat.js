@@ -37,7 +37,8 @@ function systemPrompt() {
 
 # 状況
 - ユーザーは運転中などで画面を見られないことがある。音声だけで理解できる説明を優先する。
-- 聞き取りミスと思われる語は、文脈から推測し、重要な場合だけ確認する。`;
+- 聞き取りミスと思われる語は、文脈から推測し、重要な場合だけ確認する。
+- 会話の冒頭に、ユーザーが claude.ai から取り込んだ過去の会話が含まれることがある。その場合は内容を踏まえ、要点を思い出しながら続きを深める。最初の返答では、これまでの流れを1〜2文でふり返ってから問いかける。`;
 }
 
 export async function POST(req) {
@@ -70,7 +71,7 @@ export async function POST(req) {
       model: process.env.CLAUDE_MODEL || "claude-sonnet-5-5",
       max_tokens: 4096,
       system: systemPrompt(),
-      messages: messages.slice(-40),
+      messages: messages.slice(-200),
       stream: true,
     }),
     signal: req.signal,
