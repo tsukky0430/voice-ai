@@ -16,6 +16,11 @@
     <div class="name" id="aiName">AI</div>
     <div class="status"><span class="dot"></span><span id="statusText">待機中</span></div>
     <div class="thread-title" id="threadTitle"></div>
+    <button class="usage-chip" id="usageChip" aria-label="使用量の詳細">
+      <span class="u-line"><b id="usagePct">0%</b> 使用済み</span>
+      <span class="u-bar"><i id="usageBar"></i></span>
+      <span class="u-reset" id="usageReset"></span>
+    </button>
     <button class="gear" id="settingsBtn" aria-label="設定">
       <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
     </button>
@@ -103,6 +108,65 @@
       <button class="x" data-close aria-label="閉じる">×</button>
     </div>
     <div class="panel-body settings">
+      <section class="group" id="usageSection">
+        <h3>使用量</h3>
+        <div class="usage-card">
+          <div class="u-head"><span id="usagePeriodLabel">今月</span> <b id="usagePct2">0%</b> 使用済み</div>
+          <div class="u-bar big"><i id="usageBar2"></i></div>
+          <div class="u-sub" id="usageResetLong"></div>
+          <dl class="u-stats">
+            <div><dt>使った金額</dt><dd id="usageYen">¥0</dd></div>
+            <div><dt>予算</dt><dd id="usageBudget">¥0</dd></div>
+            <div><dt>やり取りの回数</dt><dd id="usageReq">0回</dd></div>
+            <div><dt>トークン（入力 / 出力）</dt><dd id="usageTok">0 / 0</dd></div>
+          </dl>
+          <p class="u-last" id="usageLast">まだ記録がありません。</p>
+        </div>
+        <div class="two">
+          <label class="row"><span>予算の期間</span>
+            <select id="budgetPeriod" class="field">
+              <option value="day">毎日</option>
+              <option value="week">毎週（月曜）</option>
+              <option value="month">毎月（1日）</option>
+            </select>
+          </label>
+          <label class="row"><span>予算（円）</span>
+            <input type="number" id="budgetYen" class="field" min="0" step="100" inputmode="numeric" />
+          </label>
+        </div>
+        <label class="row"><span>為替レート（1ドル = 何円）</span>
+          <input type="number" id="fxRate" class="field" min="50" max="400" step="1" inputmode="numeric" />
+        </label>
+        <div class="actions"><button id="usageResetBtn">使用量を 0 に戻す</button></div>
+        <p class="hint">この数字は、このアプリが Claude API に支払う料金です。claude.ai のプラン（Pro・Max）の使用量とは別のもので、互いに影響しません。記録はこの端末ごとです。正確な請求額は console.anthropic.com の「Usage」で確認できます。</p>
+      </section>
+
+      <section class="group">
+        <h3>モデル</h3>
+        <label class="row"><span>使うモデル</span>
+          <select id="modelSel" class="field">
+            <option value="claude-fable-5-1">Fable 5.1 ― 最も賢い・料金高め・返事が遅め</option>
+            <option value="claude-opus-5-5">Opus 5.5 ― 高性能・バランス型</option>
+            <option value="claude-sonnet-5-5">Sonnet 5.5 ― 速くて手頃（会話向き）</option>
+            <option value="claude-haiku-4-5-20251001">Haiku 4.5 ― 最速・最安</option>
+          </select>
+        </label>
+        <p class="hint" id="modelPrice"></p>
+        <label class="row"><span>エフォート（どれだけ深く考えるか）</span>
+          <select id="effortSel" class="field">
+            <option value="">おまかせ（モデルの標準）</option>
+            <option value="low">low ― すばやく、トークン少なめ</option>
+            <option value="medium">medium ― ほどよく考える</option>
+            <option value="high">high ― しっかり考える</option>
+            <option value="xhigh">xhigh ― かなり深く考える</option>
+            <option value="max">max ― 最大限考える（遅い・高い）</option>
+          </select>
+        </label>
+        <p class="hint" id="effortHint"></p>
+      </section>
+
+      <section class="group">
+        <h3>声</h3>
       <label class="row">
         <span>声の種類</span>
         <select id="voiceSel" class="field"></select>
@@ -122,12 +186,17 @@
         <button id="resetVoiceBtn">初期値に戻す</button>
       </div>
       <p class="hint">選べる声は端末によって変わります。iPhone では「設定 → アクセシビリティ → 読み上げコンテンツ → 声 → 日本語」から高品質な声（Kyoko 拡張 など）を追加すると、ここで選べるようになります。</p>
+      </section>
+
+      <section class="group">
+        <h3>合言葉</h3>
 
       <label class="row">
-        <span>合言葉</span>
+        <span>APP_PASSCODE</span>
         <input type="password" id="passIn" class="field" placeholder="APP_PASSCODE" autocomplete="off" />
       </label>
       <div class="actions"><button id="passSaveBtn">合言葉を保存</button></div>
+      </section>
     </div>
   </aside>
 

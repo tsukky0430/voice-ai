@@ -2,10 +2,19 @@
 // 必要な環境変数（Vercel の Settings → Environment Variables で設定）
 //   ANTHROPIC_API_KEY  … Claude の API キー（必須）
 //   APP_PASSCODE       … アプリの合言葉（推奨。他人に API を使われないため）
-//   CLAUDE_MODEL       … 使うモデル（省略時 claude-sonnet-5-5）
+//   CLAUDE_MODEL       … アプリ側で選ばなかったときのモデル（省略時 claude-sonnet-5-5）
 //   AI_NAME            … AI の名前（省略時「アシスタント」）
 
-export const config = { maxDuration: 60 };
+export const config = { maxDuration: 300 }; // 深く考えるモデル・エフォートでも途中で切れないよう、Hobby プランの上限（5分）
+
+// 選べるモデルと料金（1M トークンあたりの米ドル）。料金は https://platform.claude.com/docs/en/models/overview
+const MODELS = {
+  "claude-fable-5-1":          { in: 10, out: 50, effort: true },
+  "claude-opus-5-5":           { in: 4,  out: 20, effort: true },
+  "claude-sonnet-5-5":         { in: 2,  out: 10, effort: true },
+  "claude-haiku-4-5-20251001": { in: 1,  out: 5,  effort: false },
+};
+const EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 
 function systemPrompt() {
   const name = process.env.AI_NAME || "アシスタント";
@@ -50,15 +59,30 @@ export async function POST(req) {
     return new Response("ANTHROPIC_API_KEY が設定されていません", { status: 500 });
   }
 
-  let messages;
+  let messages, reqModel, reqEffort;
   try {
-    ({ messages } = await req.json());
+    ({ messages, model: reqModel, effort: reqEffort } = await req.json());
   } catch {
     return new Response("bad request", { status: 400 });
   }
   if (!Array.isArray(messages) || messages.length === 0) {
     return new Response("bad request", { status: 400 });
   }
+
+  const fallback = MODELS[process.env.CLAUDE_MODEL] ? process.env.CLAUDE_MODEL : "claude-sonnet-5-5";
+  const model = MODELS[reqModel] ? reqModel : fallback;
+  const price = MODELS[model];
+  const effort = price.effort && EFFORTS.includes(reqEffort) ? reqEffort : null;
+
+  const payload = {
+    model,
+    // 考える量（思考）も出力に含まれるため、余裕を持たせる
+    max_tokens: effort === "xhigh" || effort === "max" ? 32000 : 16000,
+    system: systemPrompt(),
+    messages: messages.slice(-200),
+    stream: true,
+  };
+  if (effort) payload.output_config = { effort };
 
   const upstream = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
@@ -67,13 +91,7 @@ export async function POST(req) {
       "x-api-key": process.env.ANTHROPIC_API_KEY,
       "anthropic-version": "2023-06-01",
     },
-    body: JSON.stringify({
-      model: process.env.CLAUDE_MODEL || "claude-sonnet-5-5",
-      max_tokens: 4096,
-      system: systemPrompt(),
-      messages: messages.slice(-200),
-      stream: true,
-    }),
+    body: JSON.stringify(payload),
     signal: req.signal,
   });
 
@@ -86,6 +104,7 @@ export async function POST(req) {
   const decoder = new TextDecoder();
   const encoder = new TextEncoder();
   let buffer = "";
+  const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
   const stream = new ReadableStream({
     async start(controller) {
       const reader = upstream.body.getReader();
@@ -102,7 +121,16 @@ export async function POST(req) {
             if (!data) continue;
             try {
               const ev = JSON.parse(data);
-              if (ev.type === "content_block_delta" && ev.delta?.type === "text_delta") {
+              if (ev.type === "message_start" && ev.message?.usage) {
+                const u = ev.message.usage;
+                usage.input = u.input_tokens || 0;
+                usage.cacheRead = u.cache_read_input_tokens || 0;
+                usage.cacheWrite = u.cache_creation_input_tokens || 0;
+                usage.output = u.output_tokens || 0;
+              } else if (ev.type === "message_delta" && ev.usage) {
+                if (ev.usage.output_tokens != null) usage.output = ev.usage.output_tokens;
+                if (ev.usage.input_tokens) usage.input = ev.usage.input_tokens;
+              } else if (ev.type === "content_block_delta" && ev.delta?.type === "text_delta") {
                 controller.enqueue(encoder.encode(ev.delta.text));
               } else if (ev.type === "error") {
                 controller.enqueue(encoder.encode(`\n（エラー：${ev.error?.message || "不明"}）`));
@@ -110,6 +138,12 @@ export async function POST(req) {
             } catch {}
           }
         }
+      } catch {}
+      // 最後に、この1回の使用量と料金を区切り文字（\u0000）のあとに付けて送る
+      const usd =
+        (usage.input * price.in + usage.cacheWrite * price.in * 1.25 + usage.cacheRead * price.in * 0.1 + usage.output * price.out) / 1e6;
+      try {
+        controller.enqueue(encoder.encode("\u0000" + JSON.stringify({ model, effort, ...usage, usd })));
       } catch {}
       controller.close();
     },

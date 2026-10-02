@@ -180,7 +180,10 @@
   // ===== 音声合成（読み上げ） =====
   const synth = window.speechSynthesis;
   let voice = null;
-  const settings = Object.assign({ voiceURI: "", rate: CONFIG.rate, pitch: CONFIG.pitch }, store.get("va.settings", {}));
+  const settings = Object.assign(
+    { voiceURI: "", rate: CONFIG.rate, pitch: CONFIG.pitch, model: "claude-sonnet-5-5", effort: "" },
+    store.get("va.settings", {})
+  );
   const FEMALE = /Kyoko|O-ren|Nanami|Haruka|Ayumi|Mizuki|Sayaka|Nana|Google 日本語|Shiori|Aoi|Mayu/i;
   const MALE = /Otoya|Hattori|Ichiro|Keita|Daichi|Naoki|Hiroshi/i;
   function jaVoices() {
@@ -390,7 +393,7 @@
     const res = await fetch("/api/chat", {
       method: "POST",
       headers: { "content-type": "application/json", "x-app-passcode": getPass() },
-      body: JSON.stringify({ messages: buildPayload(history) }),
+      body: JSON.stringify({ messages: buildPayload(history), model: settings.model, effort: settings.effort }),
       signal,
     });
     if (res.status === 401 && !retried) {
@@ -420,14 +423,17 @@
     resetSpeech();
     streamDone = false;
     const ctl = (abortCtl = new AbortController());
-    let full = "";
+    let full = "", raw = "";
     try {
       let stream;
       try {
         stream = demoMode ? demoStream(text) : apiStream(ctl.signal);
         for await (const chunk of stream) {
           if (ctl.signal.aborted) break;
-          full += chunk;
+          // 本文のあとに「\u0000 + 使用量」が付いてくるので、本文だけを表示・読み上げる
+          raw += chunk;
+          const cut = raw.indexOf("\u0000");
+          full = cut < 0 ? raw : raw.slice(0, cut);
           renderRich(els.ai, full);
           els.captions.scrollTop = els.captions.scrollHeight;
           flushSpeech(full, false);
@@ -451,6 +457,8 @@
         return;
       }
       flushSpeech(full, true);
+      const cut = raw.indexOf("\u0000");
+      if (cut >= 0) { try { recordUsage(JSON.parse(raw.slice(cut + 1))); } catch {} }
       history.push({ role: "assistant", content: full || "（返答なし）" });
       saveHistory();
       streamDone = true;
@@ -725,6 +733,130 @@
     openPanel("threads");
   });
 
+  // ===== 使用量（このアプリが API に払った料金を、予算に対する割合で表示） =====
+  const budget = Object.assign({ period: "month", yen: 3000, fx: 150 }, store.get("va.budget", {}));
+  let usage = store.get("va.usage", null);
+  const PERIOD_LABEL = { day: "今日", week: "今週", month: "今月" };
+  const MODEL_LABEL = {
+    "claude-fable-5-1": "Fable 5.1", "claude-opus-5-5": "Opus 5.5",
+    "claude-sonnet-5-5": "Sonnet 5.5", "claude-haiku-4-5-20251001": "Haiku 4.5",
+  };
+  const MODEL_PRICE = {
+    "claude-fable-5-1": [10, 50], "claude-opus-5-5": [4, 20],
+    "claude-sonnet-5-5": [2, 10], "claude-haiku-4-5-20251001": [1, 5],
+  };
+
+  function periodStart(d = new Date()) {
+    const x = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+    if (budget.period === "week") x.setDate(x.getDate() - ((x.getDay() + 6) % 7));
+    if (budget.period === "month") x.setDate(1);
+    return x;
+  }
+  function nextReset() {
+    const x = periodStart();
+    if (budget.period === "day") x.setDate(x.getDate() + 1);
+    else if (budget.period === "week") x.setDate(x.getDate() + 7);
+    else x.setMonth(x.getMonth() + 1);
+    return x;
+  }
+  function freshUsage() { return { start: periodStart().getTime(), usd: 0, input: 0, output: 0, requests: 0, last: null }; }
+  function ensurePeriod() {
+    if (!usage || usage.start !== periodStart().getTime()) { usage = freshUsage(); store.set("va.usage", usage); }
+  }
+  function recordUsage(u) {
+    ensurePeriod();
+    const before = pct();
+    usage.usd += u.usd || 0;
+    usage.input += (u.input || 0) + (u.cacheRead || 0) + (u.cacheWrite || 0);
+    usage.output += u.output || 0;
+    usage.requests += 1;
+    usage.last = { ...u, at: Date.now() };
+    store.set("va.usage", usage);
+    renderUsage();
+    const after = pct();
+    if (before < 80 && after >= 80 && after < 100) toast(`${PERIOD_LABEL[budget.period]}の予算の ${after}% を使いました`, 5000);
+    if (before < 100 && after >= 100) toast(`${PERIOD_LABEL[budget.period]}の予算を使い切りました。設定でモデルを軽くするか、予算を見直してください。`, 7000);
+  }
+  function pct() {
+    if (!usage || !budget.yen) return 0;
+    return Math.round(((usage.usd * budget.fx) / budget.yen) * 100);
+  }
+  const yen = (usd) => "¥" + Math.round(usd * budget.fx).toLocaleString("ja-JP");
+  const yenFine = (usd) => { const v = usd * budget.fx; return "¥" + (v < 10 ? v.toFixed(1) : Math.round(v).toLocaleString("ja-JP")); };
+  function resetText(long) {
+    const r = nextReset();
+    const hm = r.toLocaleTimeString("ja-JP", { hour: "numeric", minute: "2-digit" });
+    const md = `${r.getMonth() + 1}/${r.getDate()}`;
+    if (budget.period === "day") return long ? `${hm}にリセットされます` : `${hm}にリセット`;
+    return long ? `${md} ${hm}にリセットされます` : `${md} ${hm}リセット`;
+  }
+  function renderUsage() {
+    ensurePeriod();
+    const p = pct();
+    const state = p >= 100 ? "over" : p >= 80 ? "warn" : "ok";
+    document.body.dataset.usage = state;
+    $("usagePct").textContent = p + "%";
+    $("usageBar").style.width = Math.min(100, p) + "%";
+    $("usageReset").textContent = resetText(false);
+    $("usagePeriodLabel").textContent = PERIOD_LABEL[budget.period];
+    $("usagePct2").textContent = p + "%";
+    $("usageBar2").style.width = Math.min(100, p) + "%";
+    $("usageResetLong").textContent = resetText(true);
+    $("usageYen").textContent = yen(usage.usd);
+    $("usageBudget").textContent = "¥" + Number(budget.yen).toLocaleString("ja-JP");
+    $("usageReq").textContent = usage.requests + "回";
+    $("usageTok").textContent = `${usage.input.toLocaleString("ja-JP")} / ${usage.output.toLocaleString("ja-JP")}`;
+    const L = usage.last;
+    $("usageLast").textContent = L
+      ? `直近の返事：${yenFine(L.usd)}（${MODEL_LABEL[L.model] || L.model}${L.effort ? "・" + L.effort : ""}、入力 ${((L.input || 0) + (L.cacheRead || 0) + (L.cacheWrite || 0)).toLocaleString("ja-JP")} / 出力 ${(L.output || 0).toLocaleString("ja-JP")} トークン）。会話が長くなるほど、1回の料金は上がります。`
+      : "まだ記録がありません。";
+  }
+  function saveBudget() { store.set("va.budget", budget); usage = null; ensurePeriodKeep(); renderUsage(); }
+  function ensurePeriodKeep() {
+    // 期間の区切りを変えたときは、今の記録を新しい期間の始まりに合わせる
+    const old = store.get("va.usage", null);
+    usage = old ? { ...old, start: periodStart().getTime() } : freshUsage();
+    store.set("va.usage", usage);
+  }
+  $("usageChip").addEventListener("click", () => {
+    renderSettings(); openPanel("settings");
+    $("usageSection").scrollIntoView({ block: "start" });
+  });
+  $("budgetPeriod").addEventListener("change", (e) => { budget.period = e.target.value; saveBudget(); });
+  $("budgetYen").addEventListener("change", (e) => { budget.yen = Math.max(0, +e.target.value || 0); saveBudget(); });
+  $("fxRate").addEventListener("change", (e) => { budget.fx = Math.min(400, Math.max(50, +e.target.value || 150)); saveBudget(); });
+  $("usageResetBtn").addEventListener("click", (e) => {
+    const b = e.target;
+    if (!b.dataset.confirm) {
+      b.dataset.confirm = "1"; b.textContent = "もう一度押すと 0 に戻します";
+      setTimeout(() => { delete b.dataset.confirm; b.textContent = "使用量を 0 に戻す"; }, 3000);
+      return;
+    }
+    usage = freshUsage(); store.set("va.usage", usage); renderUsage();
+    delete b.dataset.confirm; b.textContent = "使用量を 0 に戻す";
+    toast("使用量を 0 に戻しました");
+  });
+  setInterval(renderUsage, 60 * 1000); // 期間の切り替わりを反映
+  renderUsage();
+
+  // ===== モデル・エフォート =====
+  function renderModel() {
+    $("modelSel").value = settings.model;
+    $("effortSel").value = settings.effort;
+    const [pin, pout] = MODEL_PRICE[settings.model] || [0, 0];
+    $("modelPrice").textContent =
+      `料金の目安：入力 100万トークンあたり $${pin}（約${yen(pin)}）、出力 $${pout}（約${yen(pout)}）。` +
+      (settings.model === "claude-fable-5-1" ? "考えてから話し始めるため、返事までに時間がかかります。" : "");
+    const noEffort = settings.model === "claude-haiku-4-5-20251001";
+    $("effortSel").disabled = noEffort;
+    const def = settings.model === "claude-opus-5-5" ? "medium" : "high";
+    $("effortHint").textContent = noEffort
+      ? "Haiku 4.5 はエフォートの指定に対応していません。"
+      : `「おまかせ」のときは ${def} になります。上げるほど深く考えますが、返事が遅くなり、料金も増えます。声の会話では low〜medium がおすすめです。`;
+  }
+  $("modelSel").addEventListener("change", (e) => { settings.model = e.target.value; store.set("va.settings", settings); renderModel(); toast(`${MODEL_LABEL[settings.model]} に切り替えました`); });
+  $("effortSel").addEventListener("change", (e) => { settings.effort = e.target.value; store.set("va.settings", settings); renderModel(); });
+
   // ===== 設定（声・速さ・高さ・合言葉） =====
   function renderVoiceOptions() {
     const sel = $("voiceSel");
@@ -744,6 +876,11 @@
     $("rateOut").textContent = "×" + Number(settings.rate).toFixed(2);
     $("pitchOut").textContent = Number(settings.pitch).toFixed(2);
     $("passIn").value = getPass();
+    renderModel();
+    $("budgetPeriod").value = budget.period;
+    $("budgetYen").value = budget.yen;
+    $("fxRate").value = budget.fx;
+    renderUsage();
   }
   function saveSettings() { store.set("va.settings", settings); pickVoice(); }
   $("voiceSel").addEventListener("change", (e) => { settings.voiceURI = e.target.value; saveSettings(); preview(); });
